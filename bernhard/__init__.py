@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -
 
+import random
 import socket
 import struct
+import time
 
 import pb
 
@@ -14,9 +16,8 @@ class TransportError(Exception):
 
 
 class TCPTransport(object):
-    def __init__(self, host, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((host, port))
+    def __init__(self, host, port, timeout=None):
+        self.sock = socket.create_connection((host, port), timeout)
 
     def close(self):
         self.sock.close()
@@ -31,7 +32,7 @@ class TCPTransport(object):
             # Rx entire response
             response = self.sock.recv(rxlen, socket.MSG_WAITALL)
             return response
-        except (socket.error, struct.error), e:
+        except (IOError, struct.error), e:
             raise TransportError(str(e))
 
 
@@ -49,7 +50,7 @@ class SSLTransport(TCPTransport):
 
 
 class UDPTransport(object):
-    def __init__(self, host, port):
+    def __init__(self, host, port, timeout):
         self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -136,14 +137,17 @@ class Message(object):
 
 
 class Client(object):
-    def __init__(self, host='127.0.0.1', port=5555, transport=TCPTransport):
+    def __init__(self, host='127.0.0.1', port=5555, transport=TCPTransport, tcp_timeout=2):
         self.host = host
         self.port = port
         self.transport = transport
+        self.tcp_timeout = tcp_timeout
         self.connection = None
+        self.attempts = 0
+        self.retry_after = None
 
     def connect(self):
-        self.connection = self.transport(self.host, self.port)
+        self.connection = self.transport(self.host, self.port, self.tcp_timeout)
 
     def disconnect(self):
         try:
@@ -152,16 +156,40 @@ class Client(object):
             pass
         self.connection = None
 
+    def _failed(self):
+        self.attempts += 1
+        self.retry_after = time.time() + random.randint(0, 2 ** self.attempts)
+
+    def _reset(self):
+        self.attempts = 0
+        self.retry_after = None
+
+    def _throttled(self):
+        return time.time() < self.retry_after
+
     def transmit(self, message):
-        for i in xrange(2):
-            if not self.connection:
-                self.connect()
+        if self._throttled():
+            return Message()
+
+        if not self.connection:
             try:
-                raw = self.connection.write(message.raw)
-                return Message(raw=raw)
-            except TransportError:
-                self.disconnect()
-        return Message()
+                self.connect()
+            except IOError:
+                self._failed()
+                return Message()
+            else:
+                self._reset()
+
+        try:
+            raw = self.connection.write(message.raw)
+        except TransportError:
+            self._failed()
+            self.disconnect()
+            return Message()
+        else:
+            self._reset()
+
+        return Message(raw=raw)
 
     def send(self, event):
         message = Message(events=[Event(params=event)])
