@@ -92,7 +92,10 @@ class Event(object):
                 for key in iter(value):
                     a = self.event.attributes.add()
                     a.key = key
-                    a.value = str(value[key])
+                    if isinstance(value[key], basestring):
+                        a.value = value[key]
+                    else:
+                        a.value = str(value[key])
             else:
                 raise TypeError("'attributes' parameter must be type 'dict'")
         elif name in set(f.name for f in pb.Event.DESCRIPTOR.fields):
